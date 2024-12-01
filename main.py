@@ -22,7 +22,12 @@ ECHO = 20
 
 st.set_page_config(page_title="Water Tank", layout="wide")
 
+# Initialize temp_sensor
+i2c = busio.I2C(board.SCL, board.SDA)
+temp_sensor = STTS22H(i2c)
 
+# Initialize SQLite database
+DB_FILE = "temperature_data.db"
 
 
 def initialize_db():
@@ -48,7 +53,6 @@ def record_temperature():
     cursor.execute("INSERT INTO temperature_records (timestamp, temperature) VALUES (?, ?)", (timestamp, temperature))
     conn.commit()
     conn.close()
-
 
 def fetch_records():
     """Fetch all temperature records from the database."""
@@ -99,27 +103,15 @@ def get_distance():
     GPIO.cleanup()
     sys.exit(1)
 
-
-def set_readings():
-    global current_temp
-    global distance
-    global tank_settings
-
-    current_temp    = temp_sensor.temperature
-    distance        = get_distance()
-    tank_settings   = {"tank_height": 260, "tank_diameter": 240}
-
-
+def tank_gallons_full():
+    return round((math.pi * (tank_settings["tank_diameter"] / 2) ** 2 * tank_settings["tank_height"] / 3785.41),1)
 
 def gallons_remaining(centimeters):
-    remaining_cm = tank_settings["tank_height"] - centimeters
+    #remaining_cm = tank_settings["tank_height"] - centimeters
+    remaining_cm = height_of_water
 
     gallons_remaining = (math.pi * (tank_settings["tank_diameter"] / 2) ** 2 * remaining_cm / 3785.41)
     return round(gallons_remaining)
-
-def gallons_used(centimeters):
-    return round(tank_gallons - self.gallons_remaining(centimeters))
-
 
 def percentage_remaining(centimeters):
     return 100 - round((centimeters / tank_settings["tank_height"]) * 100)
@@ -130,13 +122,19 @@ def celsius_fahrenheit(c):
         return None
     return c * 9 / 5 + 32
 
+def set_readings():
+    global current_temp
+    global distance
+    global tank_settings
+    global gallons_at_full
+    global height_of_water
 
-# Initialize temp_sensor
-i2c = busio.I2C(board.SCL, board.SDA)
-temp_sensor = STTS22H(i2c)
+    current_temp    = temp_sensor.temperature
+    distance        = get_distance()
+    tank_settings   = {"tank_height": 260, "tank_diameter": 240}
+    height_of_water = tank_settings['tank_height'] - distance
 
-# Initialize SQLite database
-DB_FILE = "temperature_data.db"
+
 
 # Initialize database
 initialize_db()
@@ -152,28 +150,50 @@ recorded_data = fetch_records()
 
 
 st.title("VALLEY WATER TANK MONITORING SYSTEM")
-st.subheader(f"Current Temperature: {current_temp} °C")
-st.subheader(f"Distance: {distance} cm ")
 
+c1,c2,c3,c4,c5  = st.columns(5)
+with c1:
+    with st.container(border=True):
+        st.write(f"Current Temperature: {current_temp} °C")
+with c2:
+    with st.container(border=True):
+        st.write(f"Distance: {distance} cm ")
+with c3:
+    with st.container(border=True):
+        st.write(f"tank_gallons_full: {tank_gallons_full()} ")
+with c4:
+    with st.container(border=True):
+        st.write(f"Gallons Remaining: { gallons_remaining(distance)} ")
+with c5:
+    with st.container(border=True):
+        st.write(f"Percent Remaining: {percentage_remaining(distance)}%")
 
-st.subheader(f"Gallons Remaining: {gallons_remaining(0)}")
-st.subheader(f"Perfect Remaining: {percentage_remaining(0)}%")
 
 col1, col2, col3 = st.columns(3)
 with col1:
-    # Static ish bargraph for gallons in tank
+    # start of attempt to have tank settings changeable in ui
+    # c1, c2 = st.columns(2)
+    # with c1:
+    #     tank_settings['tank_height'] = st.number_input("Tank Height cm?", 100, 500, tank_settings['tank_height'])
+    # with c2:
+    #     tank_settings['tank_diameter'] = st.number_input("Tank Diameter cm?", 100, 500, tank_settings['tank_diameter'])
 
-    value = distance
+
+    # Static ish bargraph for gallons in tank
+    st.subheader("Gallons Remaining")
+    value = gallons_remaining(height_of_water)
+
     gallons_fig = go.Figure()
     gallons_fig.add_bar(x=["Value"], y=[value], name="Gallons", marker_color="blue")
-
-    gallons_fig.update_yaxes(range=[0, 100])  # Set y-axis bounds (lower: 0, upper: 100)
+    gallons_fig.update_yaxes(range=[0, tank_gallons_full()])  # Set y-axis bounds (lower: 0, upper: 100)
     gallons_fig.update_layout(
-        title="Gallons in Tank",
+        title="",
         yaxis_title="Gallons",
         xaxis_title="",
     )
     st.plotly_chart(gallons_fig)
+
+
 
 
 with col2:
@@ -258,11 +278,6 @@ st.write('---')
 col1, col2 = st.columns(2)
 
 with col1:
-    # Streamlit UI
-    st.title("Distance")
-    st.subheader(f"{distance} CM")
-
-
     chart_data = pd.DataFrame(
         {
             "col1": np.random.randn(20),
@@ -272,9 +287,6 @@ with col1:
     )
 
     st.area_chart(chart_data, x="col1", y="col2", color="col3")
-    #st.area_chart(df, x="Timestamp", y="Temperature")
-
-
 
 with col2:
     priceVolumeSeries = [
