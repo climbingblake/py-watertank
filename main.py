@@ -5,6 +5,7 @@ from datetime import datetime
 import pandas as pd  # For working with data
 import board
 import busio
+import os
 from stts22h import STTS22H
 import RPi.GPIO as GPIO
 import sys
@@ -13,6 +14,9 @@ import numpy as np
 from streamlit_lightweight_charts import renderLightweightCharts
 import streamlit_lightweight_charts.dataSamples as dataSamples
 import plotly.graph_objects as go
+import qwiic_relay
+from streamlit_autorefresh import st_autorefresh
+
 
 
 GPIO.setmode(GPIO.BCM)
@@ -21,14 +25,17 @@ TRIG = 21
 ECHO = 20
 
 st.set_page_config(page_title="Water Tank", layout="wide")
+page_count = st_autorefresh(interval=20000, limit=1000, key="pagerefreshcounter")
 
 # Initialize temp_sensor
 i2c = busio.I2C(board.SCL, board.SDA)
 temp_sensor = STTS22H(i2c)
 
-# Initialize SQLite database
-DB_FILE = "temperature_data.db"
+# Initialize Relay
+plug_relay = qwiic_relay.QwiicRelay(0x18)
 
+# Initialize SQLite database
+DB_FILE = "database.db"
 
 def initialize_db():
     """Initialize the SQLite database and create a table if it doesn't exist."""
@@ -40,6 +47,14 @@ def initialize_db():
             timestamp TEXT NOT NULL,
             temperature REAL NOT NULL
         )
+    """)
+    conn.commit()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
     """)
     conn.commit()
     conn.close()
@@ -54,14 +69,43 @@ def record_temperature():
     conn.commit()
     conn.close()
 
-def fetch_records():
-    """Fetch all temperature records from the database."""
+def update_setting(key, value):
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    cursor.execute("SELECT timestamp, temperature FROM temperature_records ORDER BY id DESC")
-    records = cursor.fetchall()
+
+    # cursor.execute("INSERT INTO settings (`key`, `value`) VALUES (?, ?)", (key, value))
+
+    # Upsert with ON CONFLICT clause
+    cursor.execute("""
+        INSERT INTO settings (key, value, timestamp)
+        VALUES (?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(key) DO UPDATE SET
+            value = excluded.value,
+            timestamp = CURRENT_TIMESTAMP
+    """, (key, value))
+
+    conn.commit()
     conn.close()
-    return records
+
+def fetch_records(table_name):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    #query = f"SELECT * FROM {table_name} ORDER BY id DESC"
+
+    try:
+        cursor.execute(f"PRAGMA table_info({table_name})")
+        columns = [col[1] for col in cursor.fetchall()]
+
+        # Fetch data
+        cursor.execute(f"SELECT * FROM {table_name} ORDER BY timestamp DESC")
+        records = cursor.fetchall()
+    except sqlite3.Error as e:
+        print(f"An error occurred: {e}")
+        records = []
+    finally:
+        conn.close()
+
+    return records, columns
 
 def get_distance():
   # print("Distance Measurment in Progress")
@@ -122,7 +166,15 @@ def celsius_fahrenheit(c):
         return None
     return c * 9 / 5 + 32
 
-def set_readings():
+def toggle_relay(arg):
+    if arg == 'on':
+        plug_relay.set_relay_on()
+    elif arg == 'off':
+        plug_relay.set_relay_off()
+    else:
+        plug_relay.set_relay_off()
+
+def init():
     global current_temp
     global distance
     global tank_settings
@@ -135,14 +187,16 @@ def set_readings():
     height_of_water = tank_settings['tank_height'] - distance
 
 
+    # Initialize database
+    if not os.path.exists(DB_FILE):
+        initialize_db()
 
-# Initialize database
-initialize_db()
+    if plug_relay.begin() == False:
+        print("The Qwiic Relay isn't connected to the system. Please check your connection", \
+            file=sys.stderr)
+        return
 
-# set global variable values
-set_readings()
-recorded_data = fetch_records()
-
+init()
 
 # -----------------------------------------------------------------------------------------------------------------------
 # -------------------------------------------------------- UI -----------------------------------------------------------
@@ -150,23 +204,46 @@ recorded_data = fetch_records()
 
 
 st.title("VALLEY WATER TANK MONITORING SYSTEM")
+#st.subheader(page_count)
+
+
 
 c1,c2,c3,c4,c5  = st.columns(5)
 with c1:
     with st.container(border=True):
-        st.write(f"Current Temperature: {current_temp} °C")
+        if st.button('Turn on Relay'):
+            toggle_relay('on')
+        if st.button('Turn OFF Relay'):
+            toggle_relay('off')
+        # Background loop to record data every hour
+        if st.button("Start Hourly Recording"):
+            st.write("Recording temperature. ")
+            record_temperature()
+
 with c2:
     with st.container(border=True):
         st.write(f"Distance: {distance} cm ")
+        st.write(f"Percent Remaining: {percentage_remaining(distance)}%")
 with c3:
     with st.container(border=True):
         st.write(f"tank_gallons_full: {tank_gallons_full()} ")
+        st.write(f"Current Temperature: {current_temp} °C")
 with c4:
     with st.container(border=True):
-        st.write(f"Gallons Remaining: { gallons_remaining(distance)} ")
+        "asd"
 with c5:
     with st.container(border=True):
-        st.write(f"Percent Remaining: {percentage_remaining(distance)}%")
+        "Settings"
+        recorded_data, columns = fetch_records('settings')
+        df = pd.DataFrame(recorded_data, columns=columns)
+        st.write(df)
+        if st.button("Update Setting (something, 1)"):
+            st.write("Updating Setting")
+            update_setting("something", "1")
+        if st.button("Update Setting (something, 2)"):
+            st.write("Updating Setting")
+            update_setting("something", "2")
+
 
 
 col1, col2, col3 = st.columns(3)
@@ -184,31 +261,35 @@ with col1:
     value = gallons_remaining(height_of_water)
 
     gallons_fig = go.Figure()
-    gallons_fig.add_bar(x=["Value"], y=[value], name="Gallons", marker_color="blue")
+    gallons_fig.add_bar(x=["Value"], y=[value], name="Gallons", marker_color="blue", text= value)
     gallons_fig.update_yaxes(range=[0, tank_gallons_full()])  # Set y-axis bounds (lower: 0, upper: 100)
     gallons_fig.update_layout(
         title="",
         yaxis_title="Gallons",
-        xaxis_title="",
+        xaxis_title=""
+
     )
     st.plotly_chart(gallons_fig)
 
 
 
-
 with col2:
-    df = pd.DataFrame(recorded_data, columns=["Timestamp", "Temperature"])  # Requires pandas
-    df["Timestamp"] = pd.to_datetime(df["Timestamp"])
+    recorded_data, columns = fetch_records('temperature_records')
+    df = pd.DataFrame(recorded_data, columns=columns)
+
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
+
     # Plot line graph
     st.subheader("Interior Temperature")
     if not df.empty:
-        st.area_chart(df.set_index("Timestamp")["Temperature"])
+        st.area_chart(df.set_index("timestamp")["temperature"])
     else:
         st.write("No data available to display.")
 
     if st.button("Record Temp"):
         record_temperature()
         st.success("Temperature added successfully!")
+
 
 with col3:
     st.subheader("Ext Temperature")
@@ -345,16 +426,3 @@ with col2:
 
 
 
-
-
-
-
-
-
-# Background loop to record data every hour
-# if st.button("Start Hourly Recording"):
-#     st.write("Recording temperature every hour. Keep this app running!")
-#     while True:
-#         record_temperature()
-#         st.write(f"Recorded: {temp_sensor.temperature:.2f} °C at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-#         time.sleep(3600)  # Wait for 1 hour
