@@ -11,11 +11,10 @@ import RPi.GPIO as GPIO
 import sys
 import math
 import numpy as np
-from streamlit_lightweight_charts import renderLightweightCharts
-import streamlit_lightweight_charts.dataSamples as dataSamples
 import plotly.graph_objects as go
 import qwiic_relay
 from streamlit_autorefresh import st_autorefresh
+from streamlit_echarts import st_echarts
 
 
 
@@ -70,10 +69,10 @@ def record_temperature():
     conn.close()
 
 def update_setting(key, value):
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
 
-    # cursor.execute("INSERT INTO settings (`key`, `value`) VALUES (?, ?)", (key, value))
+    conn = sqlite3.connect(DB_FILE)
+    conn.set_trace_callback(log_query)
+    cursor = conn.cursor()
 
     # Upsert with ON CONFLICT clause
     cursor.execute("""
@@ -84,7 +83,14 @@ def update_setting(key, value):
             timestamp = CURRENT_TIMESTAMP
     """, (key, value))
 
-    conn.commit()
+    try:
+        conn.commit()
+        print("0000000")
+        print(value)
+        st.session_state.settings[key] = value
+    except Exception as e:
+        print("Failed to commit:", e)
+
     conn.close()
 
 def fetch_records(table_name):
@@ -148,17 +154,17 @@ def get_distance():
     sys.exit(1)
 
 def tank_gallons_full():
-    return round((math.pi * (tank_settings["tank_diameter"] / 2) ** 2 * tank_settings["tank_height"] / 3785.41),1)
+    return round((math.pi * (float(st.session_state.settings['tank_diameter']) / 2) ** 2 * float(st.session_state.settings['tank_height']) / 3785.41),1)
 
 def gallons_remaining(centimeters):
-    #remaining_cm = tank_settings["tank_height"] - centimeters
+    #remaining_cm = st.session_state.settings['tank_diameter'] - centimeters
     remaining_cm = height_of_water
 
-    gallons_remaining = (math.pi * (tank_settings["tank_diameter"] / 2) ** 2 * remaining_cm / 3785.41)
+    gallons_remaining = (math.pi * (float(st.session_state.settings['tank_diameter']) / 2) ** 2 * remaining_cm / 3785.41)
     return round(gallons_remaining)
 
 def percentage_remaining(centimeters):
-    return 100 - round((centimeters / tank_settings["tank_height"]) * 100)
+    return 100 - round((centimeters / float(st.session_state.settings['tank_height']) * 100))
 
 def celsius_fahrenheit(c):
     c = float(c)
@@ -177,24 +183,61 @@ def toggle_relay(arg):
 def init():
     global current_temp
     global distance
-    global tank_settings
     global gallons_at_full
     global height_of_water
+    global db_settings
+
+    if "settings" not in st.session_state:
+        # Get Settings from the database
+        data, columns = fetch_records("settings")
+        db_settings = {key: value for key, value, _ in data}
+
+        st.session_state.settings = {
+            "tank_height": db_settings.get('tank_height'),
+            "tank_diameter": db_settings.get('tank_diameter'),
+            "relay_temp_on": 35,
+            "relay_temp_off": 45,
+            "relay_state": False
+        }
 
     current_temp    = temp_sensor.temperature
     distance        = get_distance()
-    tank_settings   = {"tank_height": 260, "tank_diameter": 240}
-    height_of_water = tank_settings['tank_height'] - distance
+    height_of_water = float(st.session_state.settings['tank_height']) - distance
 
 
-    # Initialize database
-    if not os.path.exists(DB_FILE):
-        initialize_db()
+    # # Initialize database
+    # try:
+    #     conn = sqlite3.connect(DB_FILE)
+    #     cur = conn.cursor()
+    #     cur.execute("SELECT 1")
+    #     result = cur.fetchone()
+    #     if result:
+    #         print("SQLite database exists")
+    #         st.write("------ 1")
+    #     else:
+    #         print("SQLite database does not exist")
+    #         st.write("------ 2")
+    #         initialize_db()
+    #     conn.close()
+    # except sqlite3.Error:
+    #     #print("SQLite database does not exist")
+    #     st.write("------ 3")
+
+
+    # TODO only need to do this once.
+    #initialize_db()
+
+
 
     if plug_relay.begin() == False:
         print("The Qwiic Relay isn't connected to the system. Please check your connection", \
             file=sys.stderr)
         return
+
+
+def log_query(query):
+    print("SQL executed:", query)
+
 
 init()
 
@@ -237,25 +280,15 @@ with c5:
         recorded_data, columns = fetch_records('settings')
         df = pd.DataFrame(recorded_data, columns=columns)
         st.write(df)
-        if st.button("Update Setting (something, 1)"):
-            st.write("Updating Setting")
-            update_setting("something", "1")
-        if st.button("Update Setting (something, 2)"):
-            st.write("Updating Setting")
-            update_setting("something", "2")
+        # th = st.slider("Tank Height cm", 0, 500, int(st.session_state.settings['tank_height']), on_change = lambda: update_setting("tank_height", th))
+        # td = st.slider("Tank Diameter cm", 0, 500, int(st.session_state.settings['tank_diameter']), on_change = lambda: update_setting("tank_diameter", td))
+
+
 
 
 
 col1, col2, col3 = st.columns(3)
 with col1:
-    # start of attempt to have tank settings changeable in ui
-    # c1, c2 = st.columns(2)
-    # with c1:
-    #     tank_settings['tank_height'] = st.number_input("Tank Height cm?", 100, 500, tank_settings['tank_height'])
-    # with c2:
-    #     tank_settings['tank_diameter'] = st.number_input("Tank Diameter cm?", 100, 500, tank_settings['tank_diameter'])
-
-
     # Static ish bargraph for gallons in tank
     st.subheader("Gallons Remaining")
     value = gallons_remaining(height_of_water)
@@ -272,15 +305,38 @@ with col1:
     st.plotly_chart(gallons_fig)
 
 
-
 with col2:
+    st.subheader("Interior Temperature")
+
     recorded_data, columns = fetch_records('temperature_records')
+    timestamps = [row[1] for row in recorded_data]  # Extract timestamps
+    temperatures = [row[2] for row in recorded_data]  # Extract temperatures
+    # https://echarts.streamlit.app/
+    # https://github.com/andfanilo/streamlit-echarts
+    options = {
+        "xAxis": {
+            "type": "category",
+            "data": timestamps,
+        },
+        "yAxis": {"type": "value"},
+        "series": [
+            {"data": temperatures, "type": "line", "areaStyle":{}}
+        ],
+    }
+    st_echarts(options=options)
+
+
+
+
+with col3:
+    st.subheader("Ext Temperature")
+
     df = pd.DataFrame(recorded_data, columns=columns)
 
     df["timestamp"] = pd.to_datetime(df["timestamp"])
 
-    # Plot line graph
-    st.subheader("Interior Temperature")
+
+
     if not df.empty:
         st.area_chart(df.set_index("timestamp")["temperature"])
     else:
@@ -291,68 +347,8 @@ with col2:
         st.success("Temperature added successfully!")
 
 
-with col3:
-    st.subheader("Ext Temperature")
-    series = [
-        {
-            "type": 'Area',
-            "data": dataSamples.priceVolumeSeriesArea,
-            "options": {
-                "topColor": 'rgba(38,198,218, 0.56)',
-                "bottomColor": 'rgba(204,9,238, 0.56)',
-                "lineColor": 'rgba(38,198,218, 1)',
-                "lineWidth": 2,
-            }
-        }
-    ]
-    options = {
-        "height": 400,
-        "rightPriceScale": {
-            "scaleMargins": {
-                "top": 0.1,
-                "bottom": 0.1,
-            },
-            "mode": 2, # PriceScaleMode: 0-Normal, 1-Logarithmic, 2-Percentage, 3-IndexedTo100
-            "borderColor": 'rgba(197, 203, 206, 0.4)',
-        },
-        "timeScale": {
-            "borderColor": 'rgba(197, 203, 206, 0.4)',
-        },
-        "layout": {
-            "background": {
-                "type": 'solid',
-                "color": '#100841'
-            },
-            "textColor": '#ffffff',
-        },
-        "grid": {
-            "vertLines": {
-                "color": 'rgba(197, 203, 206, 0.4)',
-                "style": 1, # LineStyle: 0-Solid, 1-Dotted, 2-Dashed, 3-LargeDashed
-            },
-            "horzLines": {
-                "color": 'rgba(197, 203, 206, 0.4)',
-                "style": 1, # LineStyle: 0-Solid, 1-Dotted, 2-Dashed, 3-LargeDashed
-            }
-        }
-    }
 
 
-    renderLightweightCharts(
-            [
-                {
-                    "series": series,
-                    "chart": options
-                }
-            ], 'Exterior Temp'
-        )
-
-
-
-
-
-
-st.write('---')
 
 
 
@@ -370,59 +366,4 @@ with col1:
     st.area_chart(chart_data, x="col1", y="col2", color="col3")
 
 with col2:
-    priceVolumeSeries = [
-        {
-            "type": 'Area',
-            "data": dataSamples.priceVolumeSeriesArea,
-            "options": {
-                "topColor": 'rgba(38,198,218, 0.56)',
-                "bottomColor": 'rgba(204,9,238, 0.56)',
-                "lineColor": 'rgba(38,198,218, 1)',
-                "lineWidth": 2,
-            }
-        }
-    ]
-    overlaidAreaSeriesOptions = {
-        "height": 400,
-        "rightPriceScale": {
-            "scaleMargins": {
-                "top": 0.1,
-                "bottom": 0.1,
-            },
-            "mode": 2, # PriceScaleMode: 0-Normal, 1-Logarithmic, 2-Percentage, 3-IndexedTo100
-            "borderColor": 'rgba(197, 203, 206, 0.4)',
-        },
-        "timeScale": {
-            "borderColor": 'rgba(197, 203, 206, 0.4)',
-        },
-        "layout": {
-            "background": {
-                "type": 'solid',
-                "color": '#100841'
-            },
-            "textColor": '#ffffff',
-        },
-        "grid": {
-            "vertLines": {
-                "color": 'rgba(197, 203, 206, 0.4)',
-                "style": 1, # LineStyle: 0-Solid, 1-Dotted, 2-Dashed, 3-LargeDashed
-            },
-            "horzLines": {
-                "color": 'rgba(197, 203, 206, 0.4)',
-                "style": 1, # LineStyle: 0-Solid, 1-Dotted, 2-Dashed, 3-LargeDashed
-            }
-        }
-    }
-
-
-    renderLightweightCharts(
-            [
-                {
-                    "series": priceVolumeSeries,
-                    "chart": overlaidAreaSeriesOptions
-                }
-            ], 'priceAndVolume'
-        )
-
-
-
+    NULL
