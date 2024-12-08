@@ -85,8 +85,6 @@ def update_setting(key, value):
 
     try:
         conn.commit()
-        print("0000000")
-        print(value)
         st.session_state.settings[key] = value
     except Exception as e:
         print("Failed to commit:", e)
@@ -103,7 +101,7 @@ def fetch_records(table_name):
         columns = [col[1] for col in cursor.fetchall()]
 
         # Fetch data
-        cursor.execute(f"SELECT * FROM {table_name} ORDER BY timestamp DESC")
+        cursor.execute(f"SELECT * FROM {table_name} ORDER BY timestamp ASC")
         records = cursor.fetchall()
     except sqlite3.Error as e:
         print(f"An error occurred: {e}")
@@ -195,9 +193,9 @@ def init():
         st.session_state.settings = {
             "tank_height": db_settings.get('tank_height'),
             "tank_diameter": db_settings.get('tank_diameter'),
-            "relay_temp_on": 35,
-            "relay_temp_off": 45,
-            "relay_state": False
+            "relay_temp_on": db_settings.get('relay_temp_on'),
+            "relay_temp_off": db_settings.get('relay_temp_off'),
+            "relay_state": db_settings.get('relay_state'),
         }
 
     current_temp    = temp_sensor.temperature
@@ -206,27 +204,21 @@ def init():
 
 
     # # Initialize database
-    # try:
-    #     conn = sqlite3.connect(DB_FILE)
-    #     cur = conn.cursor()
-    #     cur.execute("SELECT 1")
-    #     result = cur.fetchone()
-    #     if result:
-    #         print("SQLite database exists")
-    #         st.write("------ 1")
-    #     else:
-    #         print("SQLite database does not exist")
-    #         st.write("------ 2")
-    #         initialize_db()
-    #     conn.close()
-    # except sqlite3.Error:
-    #     #print("SQLite database does not exist")
-    #     st.write("------ 3")
-
-
-    # TODO only need to do this once.
-    #initialize_db()
-
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cur = conn.cursor()
+        cur.execute("SELECT * from settings;")
+        result = cur.fetchone()
+        conn.close()
+    except sqlite3.Error:
+        print("SQLite database does not exist")
+        # TODO only need to do this once.
+        initialize_db()
+        update_setting("tank_diameter", 240)
+        update_setting("tank_height", 260)
+        update_setting("relay_temp_on", 35)
+        update_setting("relay_temp_off", 45)
+        update_setting("relay_state", False)
 
 
     if plug_relay.begin() == False:
@@ -273,7 +265,15 @@ with c3:
         st.write(f"Current Temperature: {current_temp} °C")
 with c4:
     with st.container(border=True):
-        "asd"
+        st.write("Relay Temp On: ")
+        st.write(st.session_state.settings['relay_temp_on'])
+
+        st.write("Relay Temp Off: ")
+        st.write(st.session_state.settings['relay_temp_off'])
+
+        st.write("Relay State")
+        st.write(st.session_state.settings['relay_state'])
+
 with c5:
     with st.container(border=True):
         "Settings"
@@ -282,7 +282,8 @@ with c5:
         st.write(df)
         # th = st.slider("Tank Height cm", 0, 500, int(st.session_state.settings['tank_height']), on_change = lambda: update_setting("tank_height", th))
         # td = st.slider("Tank Diameter cm", 0, 500, int(st.session_state.settings['tank_diameter']), on_change = lambda: update_setting("tank_diameter", td))
-
+        # if st.button("update"):
+        #     update_setting("tank_diameter", 240)
 
 
 
@@ -311,6 +312,9 @@ with col2:
     recorded_data, columns = fetch_records('temperature_records')
     timestamps = [row[1] for row in recorded_data]  # Extract timestamps
     temperatures = [row[2] for row in recorded_data]  # Extract temperatures
+    relay_on_temp = [st.session_state.settings['relay_temp_on']] * len(recorded_data)
+    relay_off_temp = [st.session_state.settings['relay_temp_off']] * len(recorded_data)
+
     # https://echarts.streamlit.app/
     # https://github.com/andfanilo/streamlit-echarts
     options = {
@@ -320,7 +324,10 @@ with col2:
         },
         "yAxis": {"type": "value"},
         "series": [
-            {"data": temperatures, "type": "line", "areaStyle":{}}
+            {"data": temperatures, "type": "line", "areaStyle":{}},
+            {"data": relay_on_temp, "type": "line"},
+            {"data": relay_off_temp, "type": "line"}
+
         ],
     }
     st_echarts(options=options)
@@ -366,4 +373,4 @@ with col1:
     st.area_chart(chart_data, x="col1", y="col2", color="col3")
 
 with col2:
-    NULL
+    "asdf"
