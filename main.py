@@ -7,7 +7,6 @@ import board
 import busio
 import os
 from stts22h import STTS22H
-import RPi.GPIO as GPIO
 import sys
 import math
 import numpy as np
@@ -15,11 +14,13 @@ import plotly.graph_objects as go
 import qwiic_relay
 from streamlit_autorefresh import st_autorefresh
 from streamlit_echarts import st_echarts
+import lgpio
 
+# pi 4
+#   import RPi.GPIO as GPIO
+#   GPIO.setmode(GPIO.BCM)
+#   GPIO.setwarnings(False)
 
-
-GPIO.setmode(GPIO.BCM)
-GPIO.setwarnings(False)
 TRIG = 21
 ECHO = 20
 
@@ -27,9 +28,24 @@ st.set_page_config(page_title="Water Tank", layout="wide")
 #page_count = st_autorefresh(interval=20000, limit=1000, key="pagerefreshcounter")
 st.cache_data(persist=True, ttl=None)
 
-# Initialize temp_sensor
-i2c = busio.I2C(board.SCL, board.SDA)
-temp_sensor = STTS22H(i2c)
+try:
+    # Initialize temp_sensor
+    i2c = busio.I2C(board.SCL, board.SDA)
+    temp_sensor = STTS22H(i2c)
+except Exception as e:
+    st.error("Couldnt Find IC2 STT52H")
+
+try:
+    handle = lgpio.gpiochip_open(0)  # Open GPIO chip
+
+    lgpio.gpio_claim_output(handle, TRIG)
+    lgpio.gpio_claim_input(handle, ECHO)
+
+    lgpio.gpio_write(handle, TRIG, 0)  # Set TRIG low
+    lgpio.gpiochip_close(handle)      # Close GPIO chip
+
+except Exception as e:
+    st.error("Couldnt Find GPIO")
 
 # Initialize Relay
 plug_relay = qwiic_relay.QwiicRelay(0x18)
@@ -58,7 +74,7 @@ def initialize_db():
     """)
     conn.commit()
     conn.close()
-    st.write("New Database Created")
+    st.success("New Database Created")
 
 def record_temperature():
     """Record the current temperature and timestamp in the database."""
@@ -117,44 +133,92 @@ def fetch_records(table_name):
     return records, columns
 
 def get_distance():
-  # print("Distance Measurment in Progress")
-  try:
-    pulse_end= 0
-    pulse_start= 0
-    GPIO.setup(TRIG, GPIO.OUT)
-    GPIO.setup(ECHO, GPIO.IN)
+    try:
+        # Open the GPIO chip
+        handle = lgpio.gpiochip_open(0)
 
-    GPIO.output(TRIG, False)
-    # print("Waiting for Sensor")
-    time.sleep(.5)
+        # Set up TRIG as output and ECHO as input
+        lgpio.gpio_claim_output(handle, TRIG)
+        lgpio.gpio_claim_input(handle, ECHO)
 
-    GPIO.output(TRIG, True)
-    time.sleep(0.00001)
-    GPIO.output(TRIG, False)
+        # Ensure TRIG is low initially
+        lgpio.gpio_write(handle, TRIG, 0)
+        time.sleep(0.5)
 
-    timeout = time.time() + 1
-    while GPIO.input(ECHO) == 0 and time.time() < timeout:
-        pulse_start = time.time()
+        # Send the ultrasonic trigger pulse
+        lgpio.gpio_write(handle, TRIG, 1)
+        time.sleep(0.00001)
+        lgpio.gpio_write(handle, TRIG, 0)
 
-    timeout = time.time() + 1
-    while GPIO.input(ECHO) == 1 and time.time() < timeout:
-        pulse_end = time.time()
+        # Wait for ECHO to go high (start of echo)
+        timeout = time.time() + 1
+        while lgpio.gpio_read(handle, ECHO) == 0 and time.time() < timeout:
+            pulse_start = time.time()
 
-    if pulse_end == 0 or pulse_start == 0:
+        # Wait for ECHO to go low (end of echo)
+        timeout = time.time() + 1
+        while lgpio.gpio_read(handle, ECHO) == 1 and time.time() < timeout:
+            pulse_end = time.time()
+
+        # If no valid pulse is detected, return None
+        if pulse_end == 0 or pulse_start == 0:
+            lgpio.gpiochip_close(handle)
+            return None
+
+        # Calculate the distance based on pulse duration
+        pulse_duration = pulse_end - pulse_start
+        distance = pulse_duration * 17150  # Speed of sound: 34300 cm/s
+        distance = round(distance, 2)
+
+        # Clean up and return distance
+        lgpio.gpiochip_close(handle)
+        return distance
+
+    except Exception as e:
+        print("An error occurred:", e)
+        lgpio.gpiochip_close(handle)
         return None
 
-    pulse_duration = pulse_end - pulse_start
+## worked on pi4
+# def get_distance():
+#   try:
+#     pulse_end= 0
+#     pulse_start= 0
+#     st.write("----------------------------1")
+#     GPIO.setup(TRIG, GPIO.OUT)
+#     GPIO.setup(ECHO, GPIO.IN)
 
-    distance = pulse_duration * 17150
-    distance = round(distance, 2)
+#     GPIO.output(TRIG, False)
+#     # print("Waiting for Sensor")
+#     time.sleep(.5)
 
-    #print("Distance: ", distance, " cm")
-    GPIO.cleanup()
-    return distance
-  except Exception as e:
-    print("An error occurred:", e)
-    GPIO.cleanup()
-    sys.exit(1)
+#     GPIO.output(TRIG, True)
+#     time.sleep(0.00001)
+#     GPIO.output(TRIG, False)
+
+#     timeout = time.time() + 1
+#     while GPIO.input(ECHO) == 0 and time.time() < timeout:
+#         pulse_start = time.time()
+
+#     timeout = time.time() + 1
+#     while GPIO.input(ECHO) == 1 and time.time() < timeout:
+#         pulse_end = time.time()
+
+#     if pulse_end == 0 or pulse_start == 0:
+#         return None
+
+#     pulse_duration = pulse_end - pulse_start
+
+#     distance = pulse_duration * 17150
+#     distance = round(distance, 2)
+
+#     #print("Distance: ", distance, " cm")
+#     GPIO.cleanup()
+#     return distance
+#   except Exception as e:
+#     print("An error occurred:", e)
+#     GPIO.cleanup()
+#     sys.exit(1)
 
 def tank_gallons_full():
     return round((math.pi * (float(st.session_state['tank_diameter']) / 2) ** 2 * float(st.session_state['tank_height']) / 3785.41),1)
@@ -189,9 +253,7 @@ def log_query(query):
 def init():
 
     if plug_relay.begin() == False:
-        print("The Qwiic Relay isn't connected to the system. Please check your connection", \
-            file=sys.stderr)
-        return
+        st.error("The Qwiic Relay isn't connected to the system. Please check your connection")
 
     if 'tank_height' not in st.session_state:
         # # Initialize database
@@ -222,16 +284,16 @@ def init():
         }
 
     st.session_state['current_temp'] = temp_sensor.temperature
-    st.session_state['distance'] = get_distance()
+    st.session_state['distance'] = 3#get_distance()
     st.session_state['height_of_water'] = float(st.session_state['tank_height']) - st.session_state['distance']
 
 init()
 
 
 
-# -----------------------------------------------------------------------------------------------------------------------
-# -------------------------------------------------------- UI -----------------------------------------------------------
-# -----------------------------------------------------------------------------------------------------------------------
+# # -----------------------------------------------------------------------------------------------------------------------
+# # -------------------------------------------------------- UI -----------------------------------------------------------
+# # -----------------------------------------------------------------------------------------------------------------------
 
 
 st.title("VALLEY WATER TANK MONITORING SYSTEM")
