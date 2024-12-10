@@ -24,7 +24,8 @@ TRIG = 21
 ECHO = 20
 
 st.set_page_config(page_title="Water Tank", layout="wide")
-page_count = st_autorefresh(interval=20000, limit=1000, key="pagerefreshcounter")
+#page_count = st_autorefresh(interval=20000, limit=1000, key="pagerefreshcounter")
+st.cache_data(persist=True, ttl=None)
 
 # Initialize temp_sensor
 i2c = busio.I2C(board.SCL, board.SDA)
@@ -57,6 +58,7 @@ def initialize_db():
     """)
     conn.commit()
     conn.close()
+    st.write("New Database Created")
 
 def record_temperature():
     """Record the current temperature and timestamp in the database."""
@@ -84,8 +86,11 @@ def update_setting(key, value):
     """, (key, value))
 
     try:
+        # commit the sql
         conn.commit()
-        st.session_state.settings[key] = value
+
+        # update state
+        st.session_state[key] = value
     except Exception as e:
         print("Failed to commit:", e)
 
@@ -152,17 +157,17 @@ def get_distance():
     sys.exit(1)
 
 def tank_gallons_full():
-    return round((math.pi * (float(st.session_state.settings['tank_diameter']) / 2) ** 2 * float(st.session_state.settings['tank_height']) / 3785.41),1)
+    return round((math.pi * (float(st.session_state['tank_diameter']) / 2) ** 2 * float(st.session_state['tank_height']) / 3785.41),1)
 
 def gallons_remaining(centimeters):
-    #remaining_cm = st.session_state.settings['tank_diameter'] - centimeters
-    remaining_cm = height_of_water
+    #remaining_cm = st.session_state['tank_diameter'] - centimeters
+    remaining_cm = st.session_state['height_of_water']
 
-    gallons_remaining = (math.pi * (float(st.session_state.settings['tank_diameter']) / 2) ** 2 * remaining_cm / 3785.41)
+    gallons_remaining = (math.pi * (float(st.session_state['tank_diameter']) / 2) ** 2 * remaining_cm / 3785.41)
     return round(gallons_remaining)
 
 def percentage_remaining(centimeters):
-    return 100 - round((centimeters / float(st.session_state.settings['tank_height']) * 100))
+    return 100 - round((centimeters / float(st.session_state['tank_height']) * 100))
 
 def celsius_fahrenheit(c):
     c = float(c)
@@ -178,60 +183,51 @@ def toggle_relay(arg):
     else:
         plug_relay.set_relay_off()
 
+def log_query(query):
+    print("SQL executed:", query)
+
 def init():
-    global current_temp
-    global distance
-    global gallons_at_full
-    global height_of_water
-    global db_settings
-
-    if "settings" not in st.session_state:
-        # Get Settings from the database
-        data, columns = fetch_records("settings")
-        db_settings = {key: value for key, value, _ in data}
-
-        st.session_state.settings = {
-            "tank_height": db_settings.get('tank_height'),
-            "tank_diameter": db_settings.get('tank_diameter'),
-            "relay_temp_on": db_settings.get('relay_temp_on'),
-            "relay_temp_off": db_settings.get('relay_temp_off'),
-            "relay_state": db_settings.get('relay_state'),
-        }
-
-    current_temp    = temp_sensor.temperature
-    distance        = get_distance()
-    height_of_water = float(st.session_state.settings['tank_height']) - distance
-
-
-    # # Initialize database
-    try:
-        conn = sqlite3.connect(DB_FILE)
-        cur = conn.cursor()
-        cur.execute("SELECT * from settings;")
-        result = cur.fetchone()
-        conn.close()
-    except sqlite3.Error:
-        print("SQLite database does not exist")
-        # TODO only need to do this once.
-        initialize_db()
-        update_setting("tank_diameter", 240)
-        update_setting("tank_height", 260)
-        update_setting("relay_temp_on", 35)
-        update_setting("relay_temp_off", 45)
-        update_setting("relay_state", False)
-
 
     if plug_relay.begin() == False:
         print("The Qwiic Relay isn't connected to the system. Please check your connection", \
             file=sys.stderr)
         return
 
+    if 'tank_height' not in st.session_state:
+        # # Initialize database
+        try:
+            conn = sqlite3.connect(DB_FILE)
+            cur = conn.cursor()
+            cur.execute("SELECT * from settings;")
+            result = cur.fetchone()
+            conn.close()
+        except sqlite3.Error:
+            print("SQLite database does not exist")
+            # TODO only need to do this once.
+            initialize_db()
+            update_setting("tank_diameter", 240)
+            update_setting("tank_height", 260)
+            update_setting("relay_temp_on", 2)
+            update_setting("relay_temp_off", 10)
 
-def log_query(query):
-    print("SQL executed:", query)
 
+        data, columns = fetch_records("settings")
+        db_settings = {key: value for key, value, _ in data}
+
+        st.session_state = {
+            "tank_height": db_settings.get('tank_height'),
+            "tank_diameter": db_settings.get('tank_diameter'),
+            "relay_temp_on": db_settings.get('relay_temp_on'),
+            "relay_temp_off": db_settings.get('relay_temp_off'),
+        }
+
+    st.session_state['current_temp'] = temp_sensor.temperature
+    st.session_state['distance'] = get_distance()
+    st.session_state['height_of_water'] = float(st.session_state['tank_height']) - st.session_state['distance']
 
 init()
+
+
 
 # -----------------------------------------------------------------------------------------------------------------------
 # -------------------------------------------------------- UI -----------------------------------------------------------
@@ -239,60 +235,56 @@ init()
 
 
 st.title("VALLEY WATER TANK MONITORING SYSTEM")
-#st.subheader(page_count)
-
 
 
 c1,c2,c3,c4,c5  = st.columns(5)
 with c1:
     with st.container(border=True):
-        if st.button('Turn on Relay'):
+
+        if st.toggle("Relay"):
             toggle_relay('on')
-        if st.button('Turn OFF Relay'):
+        else:
             toggle_relay('off')
-        # Background loop to record data every hour
-        if st.button("Start Hourly Recording"):
-            st.write("Recording temperature. ")
+        if st.button("Reset Session State"):
+            for key in list(st.session_state.keys()):
+                del st.session_state[key]
+        if st.button("Record Temp"):
             record_temperature()
+            st.success("Temperature added successfully!")
 
 with c2:
     with st.container(border=True):
-        st.write(f"Distance: {distance} cm ")
-        st.write(f"Percent Remaining: {percentage_remaining(distance)}%")
+        st.write(f"Distance: {st.session_state['distance']} cm ")
+        st.write(f"Percent Remaining: {percentage_remaining(st.session_state['distance'])}%")
 with c3:
     with st.container(border=True):
         st.write(f"tank_gallons_full: {tank_gallons_full()} ")
-        st.write(f"Current Temperature: {current_temp} °C")
+        st.write(f"Current Temperature: {st.session_state['current_temp']} °C")
 with c4:
-    with st.container(border=True):
-        st.write("Relay Temp On: ")
-        st.write(st.session_state.settings['relay_temp_on'])
+    "State Settings"
 
-        st.write("Relay Temp Off: ")
-        st.write(st.session_state.settings['relay_temp_off'])
+    df = pd.DataFrame(
+        list(st.session_state.items()),  # Convert dictionary to a list of tuples
+        columns=["Setting", "Value"]  # Define column names
+    )
+    df["Value"] = df["Value"].astype(str)
+    st.write(df)
 
-        st.write("Relay State")
-        st.write(st.session_state.settings['relay_state'])
 
 with c5:
-    with st.container(border=True):
-        "Settings"
-        recorded_data, columns = fetch_records('settings')
-        df = pd.DataFrame(recorded_data, columns=columns)
-        st.write(df)
-        # th = st.slider("Tank Height cm", 0, 500, int(st.session_state.settings['tank_height']), on_change = lambda: update_setting("tank_height", th))
-        # td = st.slider("Tank Diameter cm", 0, 500, int(st.session_state.settings['tank_diameter']), on_change = lambda: update_setting("tank_diameter", td))
-        # if st.button("update"):
-        #     update_setting("tank_diameter", 240)
 
-
+    "Settings"
+    recorded_data, columns = fetch_records('settings')
+    df = pd.DataFrame(recorded_data, columns=columns)
+    df["value"] = df["value"].astype(str)
+    st.write(df)
 
 
 col1, col2, col3 = st.columns(3)
 with col1:
     # Static ish bargraph for gallons in tank
     st.subheader("Gallons Remaining")
-    value = gallons_remaining(height_of_water)
+    value = gallons_remaining(st.session_state['height_of_water'])
 
     gallons_fig = go.Figure()
     gallons_fig.add_bar(x=["Value"], y=[value], name="Gallons", marker_color="blue", text= value)
@@ -306,18 +298,20 @@ with col1:
     st.plotly_chart(gallons_fig)
 
 
+
 with col2:
     st.subheader("Interior Temperature")
 
     recorded_data, columns = fetch_records('temperature_records')
     timestamps = [row[1] for row in recorded_data]  # Extract timestamps
     temperatures = [row[2] for row in recorded_data]  # Extract temperatures
-    relay_on_temp = [st.session_state.settings['relay_temp_on']] * len(recorded_data)
-    relay_off_temp = [st.session_state.settings['relay_temp_off']] * len(recorded_data)
+    relay_on_temp = [st.session_state['relay_temp_on']] * len(recorded_data)
+    relay_off_temp = [st.session_state['relay_temp_off']] * len(recorded_data)
 
     # https://echarts.streamlit.app/
     # https://github.com/andfanilo/streamlit-echarts
     options = {
+        "ID": "C",
         "xAxis": {
             "type": "category",
             "data": timestamps,
@@ -336,41 +330,49 @@ with col2:
 
 
 with col3:
-    st.subheader("Ext Temperature")
+    st.subheader("Interior Temperature F")
 
-    df = pd.DataFrame(recorded_data, columns=columns)
+    recorded_data, columns = fetch_records('temperature_records')
+    timestamps = [row[1] for row in recorded_data]  # Extract timestamps
+    temperatures = [celsius_fahrenheit(row[2]) for row in recorded_data]  # Extract temperatures
+    relay_on_temp = [celsius_fahrenheit(st.session_state['relay_temp_on'])] * len(recorded_data)
+    relay_off_temp = [celsius_fahrenheit(st.session_state['relay_temp_off'])] * len(recorded_data)
 
-    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    # https://echarts.streamlit.app/
+    # https://github.com/andfanilo/streamlit-echarts
+    options = {
+        "ID": "F",
+        "xAxis": {
+            "type": "category",
+            "data": timestamps,
+        },
+        "yAxis": {"type": "value"},
+        "series": [
+            {"data": temperatures, "type": "line", "areaStyle":{}},
+            {"data": relay_on_temp, "type": "line"},
+            {"data": relay_off_temp, "type": "line"}
+
+        ],
+    }
+    st_echarts(options=options)
+
+
+st.subheader("Ext Temperature")
+
+chart_data = pd.DataFrame(
+    {
+        "col1": np.random.randn(20),
+        "col2": np.random.randn(20),
+        "col3": np.random.choice(["A", "B", "C"], 20),
+    }
+)
+
+st.area_chart(chart_data, x="col1", y="col2", color="col3")
 
 
 
-    if not df.empty:
-        st.area_chart(df.set_index("timestamp")["temperature"])
-    else:
-        st.write("No data available to display.")
-
-    if st.button("Record Temp"):
-        record_temperature()
-        st.success("Temperature added successfully!")
 
 
 
 
 
-
-
-col1, col2 = st.columns(2)
-
-with col1:
-    chart_data = pd.DataFrame(
-        {
-            "col1": np.random.randn(20),
-            "col2": np.random.randn(20),
-            "col3": np.random.choice(["A", "B", "C"], 20),
-        }
-    )
-
-    st.area_chart(chart_data, x="col1", y="col2", color="col3")
-
-with col2:
-    "asdf"
